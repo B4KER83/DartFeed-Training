@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DartFeed Training Capture</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="banner">
+  Training Capture — isolated data-collection tool. No connection to production DartFeed scoring, calibration, or the v0.3 model.
+</div>
+
+<header class="topbar">
+  <h1>Training Capture <span id="tc-version-tag" class="version-tag">v0.1.0</span></h1>
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="capture">Capture</button>
+    <button class="tab-btn" data-tab="review">Review</button>
+    <button class="tab-btn" data-tab="config">Config</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ===================== CAPTURE TAB ===================== -->
+  <section id="tab-capture" class="tab-panel active">
+    <div class="capture-layout">
+      <div class="video-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+      </div>
+
+      <div class="side-panel">
+        <div class="status-card">
+          <div class="status-row"><span>Session</span><b id="stat-session">—</b></div>
+          <div class="status-row"><span>Round</span><b id="stat-round">—</b></div>
+          <div class="status-row"><span>Dart count</span><b id="stat-dartcount">—</b></div>
+          <div class="status-row"><span>State</span><b id="stat-state" class="state-pill">IDLE</b></div>
+          <div class="status-row"><span>Captures (session)</span><b id="stat-captures">0</b></div>
+          <div class="status-row"><span>Camera resolution</span><b id="stat-resolution">—</b></div>
+          <div class="status-row"><span>FPS</span><b id="stat-fps">—</b></div>
+        </div>
+
+        <div class="status-card">
+          <div class="status-row">
+            <span>Detection mode</span>
+            <select id="detection-mode">
+              <option value="ai">AI detection</option>
+              <option value="background">Background change</option>
+              <option value="combined">Combined</option>
+            </select>
+          </div>
+          <div class="status-row"><span>AI model</span><b id="ai-model-status">not loaded</b></div>
+          <div id="ai-status-block">
+            <div class="status-row"><span>AI state</span><b id="ai-state">—</b></div>
+            <div class="status-row"><span>AI confidence</span><b id="ai-confidence">—</b></div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <button id="btn-start-session" class="primary">Start Session</button>
+          <button id="btn-end-session" disabled>End Session</button>
+          <button id="btn-roi-toggle">Draw ROI</button>
+          <button id="btn-force-capture" disabled title="Force-capture the current frame as the next dart, when neither detector catches it">Force Capture</button>
+          <button id="btn-darts-removed" disabled title="Manually confirm the board is empty, when automatic detection doesn't catch it">Darts Removed</button>
+          <button id="btn-record" disabled title="Records the camera feed with a live status HUD, plus a matching debug log covering the same time window">Record Clip</button>
+          <label class="checkbox"><input type="checkbox" id="chk-debug"> Debug overlay</label>
+        </div>
+        <div id="record-unsupported" class="status-card hidden">
+          <span class="muted-note">Recording (MediaRecorder) isn't supported on this browser — try Safari 14.3+ on iOS, or a recent Chrome.</span>
+        </div>
+
+        <div id="zoom-panel" class="status-card hidden">
+          <div class="status-row"><span>Zoom</span><b id="zoom-value">1.0x</b></div>
+          <input type="range" id="zoom-slider" min="1" max="1" step="0.1" value="1">
+        </div>
+        <div id="zoom-unsupported" class="status-card hidden">
+          <span class="muted-note">Zoom control not supported on this camera/browser.</span>
+        </div>
+
+        <div id="debug-panel" class="debug-panel hidden">
+          <h3>Debug</h3>
+          <div id="debug-fields"></div>
+          <button id="btn-export-debug-log" style="margin-top:8px;">Export debug log</button>
+          <h4>Event log</h4>
+          <div id="debug-log" class="debug-log"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== REVIEW TAB ===================== -->
+  <section id="tab-review" class="tab-panel">
+    <div class="review-toolbar">
+      <button id="btn-refresh-review">Refresh</button>
+    </div>
+    <div id="review-root"></div>
+  </section>
+
+  <!-- ===================== CONFIG TAB ===================== -->
+  <section id="tab-config" class="tab-panel">
+    <div id="config-root" class="config-grid"></div>
+    <div class="controls">
+      <button id="btn-config-save" class="primary">Save</button>
+      <button id="btn-config-reset">Reset to defaults</button>
+    </div>
+  </section>
+</main>
+
+<div id="lightbox" class="lightbox hidden">
+  <img id="lightbox-img" alt="capture preview">
+  <button id="lightbox-close">Close</button>
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/camera.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/roi.js"></script>
+<script src="js/aiDetector.js"></script>
+<script src="js/stateMachine.js"></script>
+<script src="js/session.js"></script>
+<script src="js/exporter.js"></script>
+<script src="js/review.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
