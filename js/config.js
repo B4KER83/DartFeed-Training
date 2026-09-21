@@ -1,0 +1,408 @@
+// Training Capture — configuration
+// All tunable thresholds live here (spec section 25). Nothing else in the
+// codebase should hardcode a magic detection number — read TC.Config instead.
+(function (global) {
+  'use strict';
+
+  // TC_VERSION — single source of truth for the version shown in the app
+  // header. Bump this with every meaningful change, same convention as
+  // the main DartFeed app: PATCH for fixes/tuning, MINOR for real feature
+  // additions.
+  //   0.1.0 — initial release (3-dart round state machine, IndexedDB
+  //           storage, full-resolution capture, ZIP export, debug overlay).
+  //   0.2.0 — camera zoom control added. ROI drawing fixed for touch
+  //           (was mouse-events-only, so it silently never worked on a
+  //           phone). Requested 4:3 camera aspect ratio. Capture target
+  //           reduced to 1920x2560 portrait, then enforced by software
+  //           downscale after capture (getUserMedia's ideal width/height/
+  //           aspectRatio are hints, not guarantees — iOS in particular
+  //           was ignoring the portrait request and delivering its
+  //           native ~4032x3024 sensor frame regardless). Empty-board/
+  //           removal detection fixed to also accept a relative drop from
+  //           the last confirmed dart-count reading, not just a fixed
+  //           absolute threshold (real sensor noise/exposure drift could
+  //           keep it from ever reading "empty" again). Obstruction check
+  //           fixed so it can no longer get permanently stuck on a large
+  //           but legitimate settled change (e.g. removing 3 darts at
+  //           once could exceed the obstruction area fraction and be
+  //           mistaken for a hand still on the board, forever). Added a
+  //           morphological close step to stop a change blob's detected
+  //           size from flickering tick-to-tick when two darts land
+  //           close together. Debug overlay now shows the live numbers
+  //           that actually drive detection/removal decisions.
+  //   0.3.0 — added a manual "Darts Removed" button (shares the exact same
+  //           finalise-round logic as automatic detection, so it's a true
+  //           override, not a separate code path) for when automatic
+  //           removal detection still misses it. Added "Export debug log"
+  //           — downloads the full event history, live detection numbers,
+  //           config, session/round, and camera info as JSON, so a
+  //           detection problem can be diagnosed remotely from one file
+  //           instead of a string of screenshots.
+  //   0.4.0 — added "Record Clip": records the camera feed (via
+  //           MediaRecorder on a canvas with a live status HUD burned in
+  //           — state/round/dart-count/timestamp) to a downloadable video,
+  //           paired with an auto-exported debug log covering the same
+  //           start/end time window (matching filename stamp). Lets a
+  //           detection problem be watched happening, not just read as
+  //           numbers. Needs MediaRecorder + canvas.captureStream support
+  //           (iOS Safari 14.3+, recent Chrome); shows a clear
+  //           "not supported" note rather than failing silently otherwise.
+  //   0.4.1 — fixed Record Clip only ever producing the debug log, never
+  //           the video: it was triggering two separate downloads
+  //           back-to-back, and iOS Safari only reliably allows one
+  //           programmatic download per user gesture, silently dropping
+  //           the first (the clip). Now bundles the clip and its log into
+  //           a single zip so there's only one download to trigger.
+  //   0.4.2 — CHANGE_THRESHOLD default raised 25 -> 45, confirmed by real
+  //           field-test data (see the comment above the setting itself)
+  //           rather than guessed. Cuts the false "noise floor" area from
+  //           video compression on the board's own texture by ~47x.
+  //   0.4.3 — the obstruction check (pauses detection while a hand/arm is
+  //           over the board) never wrote to the event history at all —
+  //           a real field test showed a completely silent 7-second gap
+  //           in the exported log while a dart was visibly missed, and
+  //           with no record of *why*. Now logs when an obstruction
+  //           starts and clears (throttled to those two transitions, not
+  //           every tick), so rapid-fire throwing repeatedly re-triggering
+  //           it — the leading suspect for that missed dart — is visible
+  //           in the next debug log instead of an unexplained gap.
+  //   0.4.4 — fixed a confirmed real bug found from a field-recorded
+  //           session: with CHANGE_THRESHOLD raised to 45, a genuine
+  //           dart's own blob can sit right at/near MIN_CHANGE_AREA and
+  //           flicker a few pixels either side of it tick-to-tick,
+  //           killing the candidate within ~125ms every time — for over
+  //           20 seconds straight in the real log, without ever
+  //           accumulating any stability. Added hysteresis: arming a NEW
+  //           candidate still needs the full MIN_CHANGE_AREA, but an
+  //           already-armed one only needs CANDIDATE_SUSTAIN_RATIO (0.5)
+  //           of that to survive, plus up to CANDIDATE_GRACE_TICKS (2)
+  //           consecutive ticks even below that before being given up on.
+  //           Verified directly against a synthetic blob-size sequence.
+  //   0.5.0 — support playing at a real, continuous pace (~1s between
+  //           throws) instead of pausing after every single dart. Two real
+  //           bugs found from reviewing recorded footage side-by-side with
+  //           its debug log: (1) the "has the scene stopped moving" check
+  //           driving the stability timer covered the ENTIRE camera frame,
+  //           not just the board — so a player naturally moving near the
+  //           oche between throws kept the whole scene "unstable" for the
+  //           full throwing sequence, merging all 3 darts into a single
+  //           settle event instead of one per dart (confirmed directly:
+  //           all 3 darts were already visibly embedded in the board while
+  //           the debug overlay still read "Darts 0/3"). Now scoped to the
+  //           board ROI only. (2) even at a single settle event, the code
+  //           always assumed exactly one new dart had landed. Since
+  //           STABILITY_DURATION_MS + COOLDOWN_MS alone already total more
+  //           than a 1-second throw cadence, more than one dart landing
+  //           within a single settle window is expected, not rare — so a
+  //           settle event now counts how many distinct dart-sized regions
+  //           are actually on the board (two independent signals: total
+  //           area grown, and connected-component count, taking the more
+  //           conservative of the two) and advances dart_count by the real
+  //           number found, instead of always by 1. This is a heuristic,
+  //           not perfect ground truth — darts landing in the same small
+  //           area (e.g. same triple) can still merge into one blob and
+  //           under-count; captures affected by this are flagged in
+  //           quality_flags so it's visible during review, rather than
+  //           failing silently. Verified directly with synthetic
+  //           multi-blob scenarios (1, 2, and 3 simultaneous darts, plus a
+  //           noisy-split-blob case to confirm the conservative estimate
+  //           doesn't overcount from a single noisy signal alone).
+  //   0.6.0 — new AI-assisted detection mode, using DartFeed AI's own
+  //           trained dart-tip heatmap model (dartfeed_ai/dartfeed_ai/
+  //           training/checkpoints/v0.3_best.pt, exported to ONNX) via
+  //           onnxruntime-web, as an alternative to the pixel-difference
+  //           detector — the background-change approach kept struggling
+  //           with real iPhone footage (missed darts, merged multi-dart
+  //           settles) despite several rounds of threshold/hysteresis
+  //           fixes. Verified before integration: the exported ONNX model
+  //           reproduces the PyTorch checkpoint's prediction on a real
+  //           dataset image to the exact same peak pixel (408, 434.7),
+  //           with comparable confidence (0.85 vs 0.838 — the small gap is
+  //           canvas vs. PIL resize interpolation, not a bug). DETECTION_
+  //           MODE selects 'ai' (default), 'background' (the original
+  //           detector, kept as a fallback), or 'combined' (AI stability
+  //           cross-checked against a real pixel-diff at the predicted
+  //           tip, to guard against the AI hallucinating a tip on a truly
+  //           empty board). Caveat carried over honestly from the model's
+  //           own training report: it was trained on only 61 real photos
+  //           and predicts exactly ONE tip per inference call (it was
+  //           never trained to enumerate multiple simultaneous darts), so
+  //           multi-dart discrimination here relies on the new-detection-
+  //           must-be-separated-from-the-last-confirmed-tip check, not on
+  //           the model itself counting darts.
+  //   0.6.1 — added a "Save Empty Board" control (Capture tab) that saves
+  //           the app's own internally-established empty-board baseline
+  //           frame as a labelled negative/empty_board training example —
+  //           for building a real negative dataset for a future model
+  //           iteration, after v0.3 was found to hallucinate confident
+  //           "dart present" peaks on an empty board (it was never trained
+  //           on any empty-board example). Saves the actual clean camera
+  //           frame the baseline was captured from — no debug HUD, overlay
+  //           graphics, or timestamp text drawn on it, same as every
+  //           ordinary dart capture — at the same resolution/JPEG quality
+  //           as normal captures. Stored separately from dart captures
+  //           (own IndexedDB store, own `negatives/` folder on export,
+  //           never annotated with a dart tip). Positive-capture behaviour,
+  //           detection logic, and export of existing sessions/rounds are
+  //           all unchanged.
+  //   0.6.2 — fixed "Save Empty Board" re-saving the same cached frame on
+  //           every press. It previously re-encoded the canvas from
+  //           whenever the empty-board baseline was last (re-)established,
+  //           so pressing the button repeatedly within one session produced
+  //           byte-identical duplicate images (confirmed from two real
+  //           export sessions: 10/10 duplicates each). It now grabs a fresh
+  //           live frame at the moment of each press, the same way an
+  //           ordinary dart capture does, while still only allowing a save
+  //           once the board has been confirmed empty at least once this
+  //           session.
+  //   0.6.3 — tightened "Save Empty Board" so it can only save while the
+  //           board is CURRENTLY in its confirmed/stable-empty resting
+  //           state (STATE.READY_FOR_DART_1), not just "was confirmed
+  //           empty at some earlier point this session" (the 0.6.2 gate).
+  //           Confirmed in a real capture session that v0.3's AI confidence
+  //           score fires confidently on a genuinely empty board (0.84,
+  //           0.64, 0.70 on three consecutive false "dart" captures), so
+  //           the gate is, and remains, based only on the background-diff
+  //           empty-baseline state — never on AI confidence.
+  //   0.7.0 — added a temporary Framing Guide (js/framingGuide.js) for
+  //           collecting the next empty-board negative batch. The first
+  //           real batch (2026-09-21) was captured at a much wider field
+  //           of view than the 61-image positive dataset (board ~75%/~100%
+  //           of frame width/height vs. the positives' own measured
+  //           ~93%/~70%) — close enough to look fine by eye, wide enough
+  //           that a model could trivially separate "positive" from
+  //           "negative" by field-of-view/background alone instead of by
+  //           dart presence. Measuring the actual required crop showed
+  //           this couldn't be fixed after the fact (the negatives simply
+  //           didn't capture enough vertical field of view), so this fixes
+  //           it at capture time instead: a live overlay shows a target
+  //           circle sized/positioned from the positive dataset's own
+  //           measured board geometry (diameter as a fraction of width/
+  //           height, centre position — all measured from the actual 61
+  //           images, not assumed), with a PASS / TOO CLOSE / TOO FAR /
+  //           OFF-CENTRE / ROTATE-TO-PORTRAIT readout using tolerances
+  //           derived from that same dataset's own real variation.
+  //           "Save Empty Board" now re-measures the actual frame being
+  //           saved at the moment of the click and refuses to save outside
+  //           that tolerance, independent of whether the live overlay is
+  //           toggled on — so a mismatched batch can no longer be saved
+  //           just because nobody was watching the overlay. The measured
+  //           geometry is recorded on the saved negative (and in export
+  //           metadata) for later verification. Purely a Training Capture
+  //           data-collection aid: does not touch production DartFeed,
+  //           calibration, scoring, the v0.3 model, or the existing
+  //           61-image dataset.
+  //   0.8.0 — found the real root cause behind the Framing Guide reading
+  //           "miles off": the 10 new negatives measured 2560x1920
+  //           LANDSCAPE, while both positive datasets are portrait — the
+  //           app's own live-camera capture (Camera.captureFrameSnapshot)
+  //           was never re-orienting a landscape-delivered frame, only
+  //           downscaling it, so on several frames the board's diameter
+  //           came out larger than the frame height (didn't even fit).
+  //           This affects every capture made through this app's live
+  //           camera on a device/browser that ignores the portrait
+  //           request, not just negatives. Fixed at the source: a
+  //           landscape-shaped delivered frame is now rotated back to
+  //           portrait (CAPTURE_ROTATE_LANDSCAPE_DEG, default 90, flip to
+  //           -90 in Config if it comes out the wrong way round) before
+  //           anything is downscaled or saved. The Framing Guide overlay
+  //           and its save-time gate (js/framingGuide.js, added in 0.7.0)
+  //           are removed entirely — its target percentages were measured
+  //           against the old orientation-broken captures and are no
+  //           longer meaningful now that capture itself is fixed; it can
+  //           be rebuilt from properly-oriented data later if still
+  //           wanted. "Save Empty Board" keeps its 0.6.3 gate (board must
+  //           be CURRENTLY confirmed empty) — only the framing check on
+  //           top of that is removed. The 10 negatives captured under the
+  //           landscape bug should be discarded and recaptured with this
+  //           fix in place, not reused.
+  var TC_VERSION = '0.8.0';
+
+  var STORAGE_KEY = 'trainingCapture.config.v1';
+
+  var DEFAULTS = {
+    // Per-pixel grayscale intensity difference (0-255) above which a pixel
+    // counts as "changed" when diffing two frames. Raised from an earlier
+    // default of 25 after real field-test data showed it was far too low
+    // for this camera/board: video compression noise across the board's
+    // own busy texture (sisal fibres, printed numbers, wire) was crossing
+    // the threshold across a large fraction of the whole ROI, not just
+    // where a dart actually was — confirmed directly by comparing a
+    // debug-log export at 25 (lastConfirmedAreaVsEmpty ~44,000, i.e. ~76%
+    // of the ROI, after a single dart) against one at 45
+    // (lastConfirmedAreaVsEmpty ~928 for the same kind of throw) — a ~47x
+    // reduction, isolating this one setting as the actual cause.
+    CHANGE_THRESHOLD: 45,
+
+    // Minimum connected-component pixel area (at detection resolution) for
+    // a change blob to be considered dart-sized rather than noise. This is
+    // the bar for ARMING a brand new candidate only — see
+    // CANDIDATE_SUSTAIN_RATIO below for what keeps one alive afterwards.
+    MIN_CHANGE_AREA: 400,
+
+    // Once a candidate is armed, only needs area >= MIN_CHANGE_AREA *
+    // this ratio to be considered "still the same candidate" (rather than
+    // the full MIN_CHANGE_AREA again). Added after real field data showed
+    // a genuine dart's own blob sitting right at/near MIN_CHANGE_AREA
+    // (with CHANGE_THRESHOLD raised to 45) flickering a few pixels either
+    // side of that floor tick-to-tick, killing the candidate within one
+    // tick (~125ms) before it could ever accumulate stability — for over
+    // 20 seconds straight, repeatedly, on a real recorded session.
+    CANDIDATE_SUSTAIN_RATIO: 0.5,
+
+    // How many consecutive "weak" ticks (below MIN_CHANGE_AREA but still
+    // above the sustain bar's floor of nothing/near-nothing) an armed
+    // candidate can survive before being given up on as genuinely gone.
+    CANDIDATE_GRACE_TICKS: 2,
+
+    // Mean absolute per-pixel difference between two CONSECUTIVE frames
+    // below which the scene is considered "not moving" (used for both the
+    // empty-board baseline and post-throw stability waits).
+    STABILITY_THRESHOLD: 6,
+
+    // How long the scene must stay under STABILITY_THRESHOLD, continuously,
+    // before a change is accepted as "settled" and captured.
+    STABILITY_DURATION_MS: 500,
+
+    // Dead time after a capture/round-transition before new changes are
+    // armed again, so residual board vibration can't double-trigger.
+    COOLDOWN_MS: 800,
+
+    // Mean absolute difference OUTSIDE the board ROI (background/wall/
+    // floor) that indicates the camera itself moved rather than something
+    // happening on the board.
+    CAMERA_MOVEMENT_THRESHOLD: 18,
+
+    // Total foreground pixel area (vs. the empty-board baseline, inside the
+    // ROI) below which the board counts as "empty again". This is a floor,
+    // not the only check — stateMachine.js also treats a >=60% drop from
+    // whatever the last confirmed dart count actually measured as "empty",
+    // since real camera sensor noise/auto-exposure drift over a session
+    // can otherwise keep this number from ever settling this low. Raised
+    // from an earlier 300 default, which field-testing showed was too
+    // tight for a real phone camera and silently prevented removal from
+    // ever being detected.
+    EMPTY_BOARD_MATCH_THRESHOLD: 600,
+
+    // Width (px) that frames are downscaled to for the detection pipeline.
+    // Full-resolution frames are always used for the actual saved capture.
+    DETECTION_WIDTH: 480,
+
+    // Target rate (Hz) of the detection loop.
+    DETECTION_FPS: 8,
+
+    // Consecutive stable ticks required before accepting the very first
+    // empty-board baseline at session/round start.
+    EMPTY_BASELINE_STABLE_FRAMES: 5,
+
+    // Manual board Region Of Interest, in detection-resolution pixel space:
+    // { x, y, w, h }. Null until the user draws one (defaults to a centred
+    // inset of the frame so the tool is usable before calibration).
+    ROI: null,
+
+    // Fraction of the ROI that changing at once means "something big is
+    // blocking the board" (a hand/arm reaching in) rather than a dart.
+    OBSTRUCTION_FRACTION: 0.35,
+
+    // JPEG quality for saved master captures (0-1).
+    CAPTURE_JPEG_QUALITY: 0.92,
+
+    // Width (px) of generated review-UI thumbnails.
+    THUMBNAIL_WIDTH: 320,
+
+    // Caps the long edge of every saved master capture, in pixels.
+    // getUserMedia's width/height/aspectRatio constraints are only
+    // "ideal" hints — iOS Safari in particular commonly ignores a
+    // requested portrait shape and hands back its native ~4032x3024
+    // sensor frame regardless. This is enforced by downscaling in
+    // software at capture time instead, so the saved file size is
+    // predictable no matter what resolution the device actually
+    // negotiates. Aspect ratio is always preserved (never force-cropped
+    // or stretched to a specific shape).
+    MAX_CAPTURE_LONG_EDGE: 2560,
+
+    // Which way to rotate a frame that Camera.captureFrameSnapshot()
+    // receives in LANDSCAPE shape (nativeWidth > nativeHeight) before
+    // saving — this app has no legitimate landscape use, so a landscape
+    // delivery always means the browser ignored the portrait capture
+    // request (see the long comment in camera.js). 90 or -90. If a saved
+    // image comes out upside-down or mirrored the wrong way for your
+    // actual phone mounting, flip this rather than needing a code change.
+    CAPTURE_ROTATE_LANDSCAPE_DEG: 90,
+
+    // Which detector decides "a new dart has appeared": 'ai' (DartFeed
+    // AI's own trained tip model, default), 'background' (the original
+    // pixel-difference detector, kept as a fallback/debug option), or
+    // 'combined' (AI stability, cross-checked against a real pixel-diff
+    // at the predicted tip so a confident-but-wrong AI reading on an
+    // empty board can't trigger a capture on its own).
+    DETECTION_MODE: 'ai',
+
+    // Minimum AI confidence (the heatmap peak's sigmoid value, 0-1) for a
+    // detection to count as a real candidate rather than noise. Not yet
+    // field-tuned against real footage — start here and adjust from the
+    // AI debug overlay's live confidence numbers, the same evidence-based
+    // way every other threshold in this file was tuned.
+    AI_CONFIDENCE_THRESHOLD: 0.6,
+
+    // How many consecutive qualifying frames (confidence above threshold,
+    // position within AI_STABILITY_MAX_MOVEMENT_PX of the running
+    // candidate) are required before a detection is accepted as a settled
+    // dart rather than a still-moving dart or a one-frame flicker.
+    AI_STABILITY_FRAMES: 4,
+
+    // Movement budget (in detection-resolution pixels — same space as
+    // MIN_CHANGE_AREA/ROI) between consecutive qualifying frames for them
+    // to count as "the same settling dart" rather than a jump to a
+    // different candidate (which resets the stability count).
+    AI_STABILITY_MAX_MOVEMENT_PX: 8,
+
+    // How far (detection-resolution pixels) a new AI detection must be
+    // from the round's most recently CAPTURED dart tip to count as a
+    // genuinely new dart rather than the same one still sitting there.
+    // Starting guess, not yet field-tuned — real dart-to-dart spacing at
+    // your camera framing will tell us if this needs adjusting.
+    AI_MIN_NEW_DART_SEPARATION_PX: 25,
+
+    // 'combined' mode only: minimum pixel-diff-vs-workingBaseline area
+    // (detection resolution, same units as MIN_CHANGE_AREA) required at
+    // the AI's predicted tip location for its detection to be trusted.
+    // Deliberately much lower than MIN_CHANGE_AREA itself — this is a
+    // sanity cross-check ("is *something* actually different there"), not
+    // a second independent detector.
+    AI_COMBINED_MIN_LOCAL_DIFF_AREA: 60
+  };
+
+  function load() {
+    var cfg = {};
+    try {
+      var raw = global.localStorage.getItem(STORAGE_KEY);
+      if (raw) cfg = JSON.parse(raw);
+    } catch (e) { /* ignore corrupt/unavailable storage, fall back to defaults */ }
+    var merged = {};
+    Object.keys(DEFAULTS).forEach(function (k) {
+      merged[k] = (cfg && cfg[k] !== undefined) ? cfg[k] : DEFAULTS[k];
+    });
+    return merged;
+  }
+
+  function save(cfg) {
+    try { global.localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg)); } catch (e) { /* ignore */ }
+  }
+
+  var TC = global.TC = global.TC || {};
+  TC.VERSION = TC_VERSION;
+  TC.Config = {
+    defaults: DEFAULTS,
+    current: load(),
+    set: function (key, value) {
+      TC.Config.current[key] = value;
+      save(TC.Config.current);
+    },
+    reset: function () {
+      TC.Config.current = JSON.parse(JSON.stringify(DEFAULTS));
+      save(TC.Config.current);
+    },
+    save: function () { save(TC.Config.current); }
+  };
+})(window);
